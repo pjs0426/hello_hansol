@@ -11,6 +11,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 import yfinance as yf
+from openai import OpenAI
 
 # ----------------------------------------------------------------------------
 # 기본 설정
@@ -103,6 +104,16 @@ if st.sidebar.button("🔄 데이터 새로고침"):
     st.rerun()
 
 st.sidebar.caption("데이터 출처: Yahoo Finance (yfinance)")
+
+st.sidebar.divider()
+st.sidebar.subheader("🤖 GPT 챗봇")
+api_key = st.sidebar.text_input(
+    "OpenAI API Key",
+    type="password",
+    placeholder="sk-...",
+    help="입력한 키는 서버에 저장되지 않으며 세션 동안만 사용됩니다.",
+)
+st.sidebar.caption("모델: gpt-4o-mini")
 
 
 # ----------------------------------------------------------------------------
@@ -243,3 +254,90 @@ with st.expander("📄 원본 데이터 보기 / 다운로드"):
         file_name=f"{selected_name}_{period}.csv",
         mime="text/csv",
     )
+
+st.divider()
+
+# ----------------------------------------------------------------------------
+# GPT 챗봇 (수집한 주식 데이터 기반)
+# ----------------------------------------------------------------------------
+st.subheader("🤖 주식 데이터 챗봇")
+st.caption("수집된 주식 데이터를 기반으로 GPT(gpt-4o-mini)가 답변합니다.")
+
+
+def build_stock_context() -> str:
+    """챗봇에게 전달할 주식 데이터 컨텍스트 문자열을 만든다."""
+    # 전체 종목 요약
+    summary_text = summary.to_string(index=False)
+
+    # 선택 종목 최근 10거래일
+    recent = hist[["Open", "High", "Low", "Close", "Volume"]].tail(10).copy()
+    recent.index = recent.index.strftime("%Y-%m-%d")
+    recent_text = recent.to_string()
+
+    return (
+        f"[전체 종목 요약 (최신)]\n{summary_text}\n\n"
+        f"[현재 선택된 종목: {selected_name} ({selected_ticker}) - 최근 10거래일, 조회기간 {period}]\n"
+        f"{recent_text}"
+    )
+
+
+# 대화 기록 초기화
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []
+
+# 대화 초기화 버튼
+col_a, col_b = st.columns([4, 1])
+with col_b:
+    if st.button("🗑️ 대화 비우기"):
+        st.session_state.chat_history = []
+        st.rerun()
+
+# 이전 대화 출력
+for msg in st.session_state.chat_history:
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
+
+# 사용자 입력
+user_input = st.chat_input("예) 오늘 가장 많이 오른 종목은? 삼성전자 최근 추세 알려줘")
+
+if user_input:
+    if not api_key:
+        st.warning("왼쪽 사이드바에 OpenAI API Key를 먼저 입력해 주세요.")
+        st.stop()
+
+    # 사용자 메시지 표시 및 저장
+    st.session_state.chat_history.append({"role": "user", "content": user_input})
+    with st.chat_message("user"):
+        st.markdown(user_input)
+
+    # GPT 호출
+    with st.chat_message("assistant"):
+        try:
+            client = OpenAI(api_key=api_key)
+
+            system_prompt = (
+                "당신은 국내 주식 데이터를 분석해 주는 금융 어시스턴트입니다. "
+                "아래에 제공된 실시간 수집 데이터만을 근거로 한국어로 답변하세요. "
+                "데이터에 없는 내용은 추측하지 말고 모른다고 답하세요. "
+                "투자 권유가 아닌 정보 제공임을 필요 시 안내하세요.\n\n"
+                f"{build_stock_context()}"
+            )
+
+            messages = [{"role": "system", "content": system_prompt}]
+            # 최근 대화 맥락 일부 포함 (직전 6개)
+            messages += st.session_state.chat_history[-6:]
+
+            with st.spinner("GPT가 답변을 생성 중입니다..."):
+                stream = client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=messages,
+                    temperature=0.3,
+                    stream=True,
+                )
+                answer = st.write_stream(stream)
+
+            st.session_state.chat_history.append(
+                {"role": "assistant", "content": answer}
+            )
+        except Exception as e:  # noqa: BLE001
+            st.error(f"GPT 호출 중 오류가 발생했습니다: {e}")
